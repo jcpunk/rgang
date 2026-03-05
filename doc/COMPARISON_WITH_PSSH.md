@@ -203,8 +203,8 @@ while preserving rgang's unique scaling architecture and feature set.
 The `--async` option provides a modern Python 3.7+ alternative to rgang's
 traditional `os.fork()` + `select()` architecture using `asyncio`:
 
-| Traditional rgang | asyncio rgang (`--async`) |
-|-------------------|--------------------------|
+| Traditional rgang                        | asyncio rgang (`--async`)                 |
+|------------------------------------------|-------------------------------------------|
 | `os.fork()` + `os.execvp("ssh")` | `asyncio.create_subprocess_exec("ssh")` |
 | `select()` event loop | `asyncio.get_event_loop()` |
 | `os.pipe()` + `os.read()`/`os.write()` | `asyncio.StreamReader`/`StreamWriter` |
@@ -227,8 +227,8 @@ needed on the initiator node.
 
 Ansible takes a different approach to the remote library problem:
 
-1. **Module transfer**: Ansible copies small Python scripts ("modules")
-   to remote nodes via SFTP/SCP before execution
+1. **Module transfer**: Ansible copies small Python scripts (called
+   "Ansible modules") to remote nodes via SFTP/SCP before execution
 2. **AnsiballZ**: Modules are compressed and wrapped in a self-extracting
    Python script that bootstraps itself using whatever Python is available
 3. **Raw mode**: For nodes without Python, Ansible's `raw` module falls
