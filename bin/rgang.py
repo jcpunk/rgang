@@ -29,6 +29,15 @@ DFLT_RCPTO = "3600.0"  # float seconds (big files?) (basically, let the user dec
 DFLT_SH = "/bin/bash"
 
 
+def _paramiko_available():
+    """Check if the rgang_paramiko module is available."""
+    try:
+        import rgang_paramiko
+        return rgang_paramiko.paramiko is not None
+    except ImportError:
+        return False
+
+
 def where(ff):
     ff = "/" + ff
     for pp in os.environ["PATH"].split(":"):
@@ -263,6 +272,10 @@ OPTSPEC = {
                           processed"
     },
     "adjust-copy-args": {"desc": 'INTERNAL - applicable for "-c" (copy-mode)'},
+    "paramiko": {
+        "desc": "use python-paramiko for SSH/SCP instead of fork+exec\n\
+                       of ssh/scp commands (requires: pip install paramiko)"
+    },
 }
 
 
@@ -1041,7 +1054,18 @@ def spawn_cmd(node_info, mach_idx, opts, args, branch_nodes, do_local):
             if g_opt["N"]:
                 sp_args = ["-N"] + sp_args
             TRACE(22, "spawn_cmd rcp sp_args=>%s<", sp_args)
-            sp_info = spawn(g_opt["rcp"], sp_args, g_opt["combine"])
+            if g_opt.get("paramiko") and _paramiko_available():
+                import rgang_paramiko
+                hostname = node_info["ret_info"]["name"]
+                sources = args[:-1]
+                sp_info = rgang_paramiko.spawn_copy(
+                    hostname, sources, dest,
+                    user=g_opt["l"] if g_opt["l"] else None,
+                    preserve=bool(g_opt["p"]),
+                    combine_stdout_stderr=g_opt["combine"],
+                )
+            else:
+                sp_info = spawn(g_opt["rcp"], sp_args, g_opt["combine"])
             node_info["stage"] = "rcp"
             timeout_add(node_info["gbl_branch_idx"], float(g_opt["rcpto"]))
         else:
@@ -1104,9 +1128,21 @@ def spawn_cmd(node_info, mach_idx, opts, args, branch_nodes, do_local):
             TRACE(22, "spawn_cmd rcp rgang sh_cmd_ss=>%s<", sh_cmd_s)
 
             sp_args = sp_args + [sh_cmd_s]
-            sp_info = spawn(
-                g_opt["rsh"], sp_args, 0
-            )  # never combine stderr/out of rsh rgang
+            if g_opt.get("paramiko") and _paramiko_available():
+                import rgang_paramiko
+                hostname = node_info["ret_info"]["name"]
+                # Build the full remote command from sp_args after hostname
+                host_idx = sp_args.index(hostname)
+                remote_cmd = " ".join(sp_args[host_idx + 1:])
+                sp_info = rgang_paramiko.spawn_ssh(
+                    hostname, remote_cmd,
+                    user=g_opt["l"] if g_opt["l"] else None,
+                    combine_stdout_stderr=False,
+                )
+            else:
+                sp_info = spawn(
+                    g_opt["rsh"], sp_args, 0
+                )  # never combine stderr/out of rsh rgang
             try:
                 for machine in branch_nodes:
                     os.write(sp_info[1], (machine + "\n").encode("utf-8"))
@@ -1190,7 +1226,19 @@ def spawn_cmd(node_info, mach_idx, opts, args, branch_nodes, do_local):
             ' && echo %s""0 || echo %s""1' % (STATUS_MAGIC, STATUS_MAGIC)
         ]
 
-        sp_info = spawn(g_opt["rsh"], sp_args, g_opt["combine"])
+        if g_opt.get("paramiko") and _paramiko_available():
+            import rgang_paramiko
+            hostname = node_info["ret_info"]["name"]
+            # Build the full remote command from sp_args after hostname
+            host_idx = sp_args.index(hostname)
+            remote_cmd = " ".join(sp_args[host_idx + 1:])
+            sp_info = rgang_paramiko.spawn_ssh(
+                hostname, remote_cmd,
+                user=g_opt["l"] if g_opt["l"] else None,
+                combine_stdout_stderr=g_opt["combine"],
+            )
+        else:
+            sp_info = spawn(g_opt["rsh"], sp_args, g_opt["combine"])
         node_info["stage"] = "rsh"
         timeout_add(node_info["gbl_branch_idx"], float(g_opt["rshto"]))
     elif len(branch_nodes) >= 1:  # rsh rgang  (not user command!)
@@ -1271,9 +1319,21 @@ def spawn_cmd(node_info, mach_idx, opts, args, branch_nodes, do_local):
         TRACE(22, "spawn_cmd rgang sh_cmd_s=>%s<", sh_cmd_s)
 
         sp_args = sp_args + [sh_cmd_s]
-        sp_info = spawn(
-            g_opt["rsh"], sp_args, 0
-        )  # never combine stderr/out of rsh rgang
+        if g_opt.get("paramiko") and _paramiko_available():
+            import rgang_paramiko
+            hostname = node_info["ret_info"]["name"]
+            # Build the full remote command from sp_args after hostname
+            host_idx = sp_args.index(hostname)
+            remote_cmd = " ".join(sp_args[host_idx + 1:])
+            sp_info = rgang_paramiko.spawn_ssh(
+                hostname, remote_cmd,
+                user=g_opt["l"] if g_opt["l"] else None,
+                combine_stdout_stderr=False,
+            )
+        else:
+            sp_info = spawn(
+                g_opt["rsh"], sp_args, 0
+            )  # never combine stderr/out of rsh rgang
         TRACE(23, "spawn_cmd sending %d nodes: %s", len(branch_nodes), branch_nodes)
         try:
             for ii in range(len(branch_nodes)):
@@ -1945,6 +2005,9 @@ def timeout_connect_process():
     ret_info["stderr"] = ret_info["stderr"] + "rgang timeout expired\n"
 
     # do kill and kill check here
+    _is_paramiko = g_opt.get("paramiko") and _paramiko_available()
+    if _is_paramiko:
+        import rgang_paramiko
     for sig in (
         1,
         2,
@@ -1953,7 +2016,10 @@ def timeout_connect_process():
         9,
     ):  # 1=HUP, 2=INT(i.e.^C), 15=TERM(default "kill"), 3=QUIT(i.e.^\), 9=KILL
         try:
-            rpid, status = os.waitpid(pid, os.WNOHANG)
+            if _is_paramiko and rgang_paramiko.is_paramiko_handle(pid):
+                rpid, status = rgang_paramiko.waitpid(pid, os.WNOHANG)
+            else:
+                rpid, status = os.waitpid(pid, os.WNOHANG)
             status = status >> 8  # but I probably won't use this status
         except:  # i.e. (OSError, '[Errno 10] No child processes')
             TRACE(10, "except - waitpid - timeout_connect_process")
@@ -1964,7 +2030,10 @@ def timeout_connect_process():
                 TRACE(31, "timeout_connect_process status=%d", status)
                 g_internal_info[mach_idx]["ret_info"]["rmt_sh_sts"] = 8
             break
-        os.kill(pid, sig)
+        if _is_paramiko and rgang_paramiko.is_paramiko_handle(pid):
+            rgang_paramiko.kill(pid, sig)
+        else:
+            os.kill(pid, sig)
         TRACE(31, "timeout_connect_process os.kill(%d,%d)", pid, sig)
         select_interrupt([], [], [], 0.05)  # use select to sleep sub second
 
@@ -2022,6 +2091,15 @@ def cleanup(signum, frame):
 def wait_nohang(pid):
     # if no exception and no process exited, (0,0) is return (as per doc)
     TRACE(5, "wait_nohang( pid=%s )", pid)
+    if g_opt.get("paramiko") and _paramiko_available():
+        import rgang_paramiko
+        if rgang_paramiko.is_paramiko_handle(pid):
+            try:
+                rpid, rstatus = rgang_paramiko.waitpid(pid, os.WNOHANG)
+                rstatus = rstatus >> 8
+                return rpid, rstatus
+            except Exception:
+                return -1, None
     for ii in range(3):  # potentially retry -- potential python/OS bug????
         try:
             rpid, rstatus = os.waitpid(pid, os.WNOHANG)
@@ -2834,7 +2912,14 @@ def rgang(opts_n_args):
                 timeout_cancel(gbl_branch_idx)
 
                 try:
-                    opid, status = os.waitpid(pid, 0)
+                    if g_opt.get("paramiko") and _paramiko_available():
+                        import rgang_paramiko
+                        if rgang_paramiko.is_paramiko_handle(pid):
+                            opid, status = rgang_paramiko.waitpid(pid, 0)
+                        else:
+                            opid, status = os.waitpid(pid, 0)
+                    else:
+                        opid, status = os.waitpid(pid, 0)
                     if opid != pid:
                         raise ProgramError("process did not exit")
                     TRACE(
@@ -3346,7 +3431,14 @@ def main():
                                 ] = 0x10
                                 pass
                             break
-                        os.kill(pid, sig)
+                        if g_opt.get("paramiko") and _paramiko_available():
+                            import rgang_paramiko
+                            if rgang_paramiko.is_paramiko_handle(pid):
+                                rgang_paramiko.kill(pid, sig)
+                            else:
+                                os.kill(pid, sig)
+                        else:
+                            os.kill(pid, sig)
                         if sig == 1:
                             kills += 1
                         prop()
