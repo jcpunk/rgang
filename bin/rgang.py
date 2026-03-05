@@ -276,6 +276,11 @@ OPTSPEC = {
         "desc": "use python-paramiko for SSH/SCP instead of fork+exec\n\
                        of ssh/scp commands (requires: pip install paramiko)"
     },
+    "async": {
+        "desc": "use asyncio-based execution (modern Python 3.7+)\n\
+                       instead of fork+exec with select() I/O multiplexing.\n\
+                       Optional: pip install asyncssh for pure-Python SSH"
+    },
 }
 
 
@@ -2351,6 +2356,77 @@ def rgang(opts_n_args):
         pass
 
     ####### NOW, DO THE WORK!!!!
+
+    # --- Async execution path (--async) ---
+    if g_opt.get("async"):
+        try:
+            import rgang_async
+        except ImportError:
+            sys.stderr.write("rgang_async module not found\n")
+            return 1, []
+
+        async_config = rgang_async.ExecutorConfig(
+            nway=nway,
+            timeout=float(g_opt["rshto"]),
+            copy_timeout=float(g_opt["rcpto"]),
+            user=g_opt["l"] if g_opt["l"] else None,
+            ssh_command=g_opt["rsh"],
+            scp_command=g_opt["rcp"],
+            combine_stderr=bool(g_opt["combine"]),
+        )
+
+        if g_opt["c"]:
+            # Copy mode
+            sources = g_args[:-1]
+            dest = g_args[-1]
+            results = rgang_async.run_copy(g_mach_l, sources, dest, async_config)
+        else:
+            # Command mode
+            command = " ".join(g_args)
+            results = rgang_async.run(g_mach_l, command, async_config)
+
+        # Convert async results to rgang ret_info format
+        overall_status = 0
+        ret_info = []
+        for r in results:
+            sts = r.exit_status if r.exit_status is not None else 0
+            overall_status |= sts
+            ret_info.append({
+                "name": r.name,
+                "stdout": r.stdout,
+                "stderr": r.stderr,
+                "rmt_sh_sts": sts,
+                "crc32": 0,
+            })
+
+        # Print output (unless pyret mode)
+        if not g_opt["pyret"]:
+            header = int(g_opt["n"])
+            output = rgang_async.format_results(
+                results,
+                header_style=header,
+                ditto=bool(g_opt["ditto"]),
+            )
+            if output:
+                sys.stdout.write(output + "\n")
+                sys.stdout.flush()
+
+        # Handle error file
+        if g_opt["mach_idx_offset"] == "" and g_opt["err-file"] != "":
+            for r in results:
+                sts = r.exit_status if r.exit_status is not None else 0
+                if sts != 0:
+                    fo = open(g_opt["err-file"], "a+")
+                    fo.write("%s # sts=%s\n" % (r.name, sts))
+                    fo.close()
+
+        if g_opt["pyprint"]:
+            pprint.pprint(ret_info)
+        elif g_opt["pypickle"]:
+            pickle_to_stdout(ret_info)
+
+        return overall_status, ret_info
+    # --- End async execution path ---
 
     # could be counting > 2G bytes
     if sys.version_info[0] == 2:
