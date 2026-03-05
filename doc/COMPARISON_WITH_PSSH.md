@@ -197,3 +197,70 @@ environments where a simple parallel SSH tool is sufficient.
 The `--paramiko` option in rgang bridges some of the gap by allowing
 rgang to use the same SSH library that many modern Python SSH tools use,
 while preserving rgang's unique scaling architecture and feature set.
+
+## Modernization: asyncio-based execution (`--async`)
+
+The `--async` option provides a modern Python 3.7+ alternative to rgang's
+traditional `os.fork()` + `select()` architecture using `asyncio`:
+
+| Traditional rgang | asyncio rgang (`--async`) |
+|-------------------|--------------------------|
+| `os.fork()` + `os.execvp("ssh")` | `asyncio.create_subprocess_exec("ssh")` |
+| `select()` event loop | `asyncio.get_event_loop()` |
+| `os.pipe()` + `os.read()`/`os.write()` | `asyncio.StreamReader`/`StreamWriter` |
+| `os.waitpid()` | `await process.wait()` |
+| `os.kill()` | `process.terminate()`/`process.kill()` |
+| Manual timeout queue | `asyncio.wait_for(coro, timeout=N)` |
+| `nway` via branch counting | `asyncio.Semaphore(nway)` |
+
+### Remote node requirements
+
+Both the traditional and async modes require **nothing extra on remote
+nodes** - only an SSH server and a shell.  The `ssh` and `scp` commands
+are executed as subprocesses on the **initiator** node.
+
+For pure-Python SSH (no forking), the `asyncssh` library can be used
+as an optional transport (similar to `--paramiko`), but this is only
+needed on the initiator node.
+
+### How Ansible solves "limited remote libraries"
+
+Ansible takes a different approach to the remote library problem:
+
+1. **Module transfer**: Ansible copies small Python scripts ("modules")
+   to remote nodes via SFTP/SCP before execution
+2. **AnsiballZ**: Modules are compressed and wrapped in a self-extracting
+   Python script that bootstraps itself using whatever Python is available
+3. **Raw mode**: For nodes without Python, Ansible's `raw` module falls
+   back to plain SSH command execution (similar to rgang)
+4. **Fact gathering**: Uses `setup` module pushed to each node to collect
+   system information
+
+rgang's approach is simpler and more appropriate for its use case:
+
+- **Leaf nodes** (where user commands run): Only need SSH + a shell.
+  No Python, no rgang, no libraries pushed.
+- **Branch nodes** (intermediate tree nodes for scaling): Need Python +
+  rgang, but these are typically the same cluster nodes that already
+  have them installed.
+- **No code transfer**: Unlike Ansible, rgang never pushes code to
+  remote nodes for basic operation.
+
+### Tree scaling with async
+
+The tree/worm model works the same with asyncio. When the node count
+exceeds `--nway`, the initiator spawns `ssh <branch-head> rgang ...`
+processes, and each branch head runs its own rgang instance to handle
+its subset.  The async module uses `asyncio.Semaphore` to limit
+concurrent SSH connections, equivalent to the traditional nway branching.
+
+```
+# Traditional (fork+exec+select):
+rgang node{01-1000} uptime
+
+# Modern async (asyncio subprocess):
+rgang --async node{01-1000} uptime
+
+# Pure-Python SSH (no fork, uses asyncssh library):
+rgang --async --use-asyncssh node{01-1000} uptime
+```
